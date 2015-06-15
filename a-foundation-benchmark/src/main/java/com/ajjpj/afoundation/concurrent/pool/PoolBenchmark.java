@@ -27,7 +27,7 @@ public class PoolBenchmark {
 //            "naive",
 //            "a-global-queue",
             "work-stealing",
-            "a-strict-own",
+//            "a-strict-own",
 //            "Fixed",
             "ForkJoin"
     })

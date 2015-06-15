@@ -14,36 +14,29 @@ import java.util.concurrent.RejectedExecutionException;
  */
 @Contended
 class WorkStealingGlobalQueue {
+    volatile int qlock;          // 1: locked, else 0
+    volatile int base;           // index of next slot for poll
+    int top;                     // index of next slot for push
 
-    /**
-     * Capacity of work-stealing queue array upon initialization.
-     * Must be a power of two; at least 4, but should be larger to
-     * reduce or eliminate cacheline sharing among queues.
-     * Currently, it is much larger, as a partial workaround for
-     * the fact that JVMs often place arrays in locations that
-     * share GC bookkeeping (especially cardmarks) such that
-     * per-write accesses encounter serious memory contention.
-     */
-    static final int INITIAL_QUEUE_CAPACITY = 1 << 13;
+    final int mask;             // bit mask for accessing the element array
+    final ASubmittable[] array; // the elements
 
-    /**
-     * Maximum size for queue arrays. Must be a power of two less
-     * than or equal to 1 << (31 - width of array entry) to ensure
-     * lack of wraparound of index calculations, but defined to a
-     * value a bit less than this to help users trap runaway
-     * programs before saturating systems.
-     */
-    static final int MAXIMUM_QUEUE_CAPACITY = 1 << 26; // 64M
 
-    volatile int qlock;        // 1: locked, -1: terminate; else 0
-    volatile int base;         // index of next slot for poll
-    int top;                   // index of next slot for push
-    ASubmittable[] array;          // the elements (initially unallocated)
+    WorkStealingGlobalQueue (int capacity) {
+        if (Integer.bitCount (capacity) != 1) {
+            throw new IllegalArgumentException ("capacity must be a power of two, is " + capacity);
+        }
+        if (capacity < 8) {
+            throw new IllegalArgumentException ("capacity must be at least 8, is " + capacity);
+        }
+        if (capacity > (1 << 26)) {
+            throw new IllegalArgumentException ("capacity must not be bigger than " + (1<<26) + ", is " + capacity);
+        }
 
-    WorkStealingGlobalQueue () {
         // Place indices in the center of array (that is not yet allocated)
-        base = top = INITIAL_QUEUE_CAPACITY >>> 1;
-        array = new ASubmittable[INITIAL_QUEUE_CAPACITY];
+        base = top = capacity / 2;
+        array = new ASubmittable[capacity];
+        mask = capacity-1;
     }
 
     private int getBase() {
@@ -109,18 +102,18 @@ class WorkStealingGlobalQueue {
      */
     private void fullExternalPush (ASubmittable task) {
         for (;;) { //TODO refactor into CAS loop?
-            if (U.compareAndSwapInt(this, QLOCK, 0, 1)) {
-                ASubmittable[] a = array;
+            if (U.compareAndSwapInt (this, QLOCK, 0, 1)) {
                 int s = top;
                 boolean submitted = false;
                 try {
-                    if ((a.length > s + 1 - getBase ()) ||
-                            (a = growArray()) != null) {   // must presize
-                        int j = (((a.length - 1) & s) << ASHIFT) + ABASE;
-                        U.putOrderedObject(a, j, task);
-                        top = s + 1;
-                        submitted = true;
+                    if (array.length <= s+1 - getBase ()) {
+                        throw new RejectedExecutionException ();
                     }
+
+                    int j = unsafeArrayOffset (s);
+                    U.putOrderedObject (array, j, task);
+                    top = s + 1;
+                    submitted = true;
                 }
                 finally {
                     qlock = 0;  // unlock
@@ -133,54 +126,18 @@ class WorkStealingGlobalQueue {
     }
 
 
-
-    /**
-     * Initializes or doubles the capacity of array. Call only with lock held -- it is OK for base, but not
-     * top, to move while resizings are in progress.
-     */
-    final ASubmittable[] growArray() { //TODO is the new value of 'array' even safely published? --> code is from FJP, but still...
-        final ASubmittable[] oldA = array;
-        final int size = oldA != null ? oldA.length << 1 : INITIAL_QUEUE_CAPACITY;
-        if (size > MAXIMUM_QUEUE_CAPACITY)
-            throw new RejectedExecutionException ("Queue capacity exceeded");
-        array = new ASubmittable[size];
-        final ASubmittable[] a = array;
-
-        if (oldA != null) {
-            final int oldMask = oldA.length - 1;
-            final int t = top;
-            int b = getBase ();
-            if (oldMask >= 0 && t-b > 0) {
-                final int mask = size - 1;
-                do {
-                    int oldj = ((b & oldMask) << ASHIFT) + ABASE;
-                    int j = ((b & mask) << ASHIFT) + ABASE;
-                    final ASubmittable x = (ASubmittable) U.getObjectVolatile (oldA, oldj);
-                    if (x != null && U.compareAndSwapObject (oldA, oldj, x, null)) {
-                        U.putObjectVolatile (a, j, x);
-                    }
-                    b += 1;
-                }
-                while (b != t);
-            }
-        }
-        return a;
-    }
-
-
     /**
      * Takes next task, if one exists, in FIFO order.
      */
     final ASubmittable poll() {
-        ASubmittable[] a;
         int b;
 
-        while ((b = getBase ()) - top < 0 && (a = array) != null) {
-            final int j = (((a.length - 1) & b) << ASHIFT) + ABASE;
-            final ASubmittable t = (ASubmittable) U.getObjectVolatile(a, j);
+        while ((b = getBase ()) - top < 0) {
+            final int j = unsafeArrayOffset (b);
+            final ASubmittable t = (ASubmittable) U.getObjectVolatile (array, j);
             if (t != null) {
-                if (U.compareAndSwapObject(a, j, t, null)) {
-                    U.putOrderedInt(this, QBASE, b + 1);
+                if (U.compareAndSwapObject (array, j, t, null)) {
+                    U.putOrderedInt (this, QBASE, b + 1);
                     return t;
                 }
             }
@@ -191,6 +148,10 @@ class WorkStealingGlobalQueue {
             }
         }
         return null;
+    }
+
+    private int unsafeArrayOffset (int index) {
+        return ((mask & index) << ASHIFT) + ABASE;
     }
 
     // Unsafe mechanics

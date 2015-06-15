@@ -34,17 +34,17 @@ public class WorkStealingPoolImpl implements APool {
     static final ASubmittable SHUTDOWN = new ASubmittable (null, null);
 
     public WorkStealingPoolImpl (int numThreads) { //TODO move default values to Builder class
-        this (numThreads, 100, 1, 100);
+        this (numThreads, 16384, 16384, 100, 1, 100);
     }
 
-    public WorkStealingPoolImpl (int numThreads, int globalBeforeLocalInterval, int numPollsBeforePark, int pollNanosBeforePark) {
-        this.globalQueue = new WorkStealingGlobalQueue ();
+    public WorkStealingPoolImpl (int numThreads, int globalCapacity, int localCapacity, int globalBeforeLocalInterval, int numPollsBeforePark, int pollNanosBeforePark) {
+        this.globalQueue = new WorkStealingGlobalQueue (globalCapacity);
         this.shutdownLatch = new CountDownLatch (numThreads);
 
         this.localQueues = new WorkStealingLocalQueue[numThreads];
         this.threads     = new WorkStealingThread [numThreads];
         for (int i=0; i<numThreads; i++) {
-            threads[i] = new WorkStealingThread (this, i, globalBeforeLocalInterval, numPollsBeforePark, pollNanosBeforePark);
+            threads[i] = new WorkStealingThread (this, i, localCapacity, globalBeforeLocalInterval, numPollsBeforePark, pollNanosBeforePark);
             localQueues[i] = threads[i].queue;
         }
     }
