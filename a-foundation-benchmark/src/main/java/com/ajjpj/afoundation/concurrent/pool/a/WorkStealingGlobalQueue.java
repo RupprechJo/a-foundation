@@ -16,12 +16,10 @@ class WorkStealingGlobalQueue {
     volatile int qlock;          // 1: locked, else 0
     volatile long base;           // index of next slot for poll - never wraps, filtered with bit mask instead
     long top;                     // index of next slot for push - never wraps, filtered with bit mask instead
-    boolean isShutdown = false;
+    volatile int isShutdown = 0;
 
     final int mask;             // bit mask for accessing the element array
     final ASubmittable[] array; // the elements
-
-    static final long FLAG_SHUTDOWN = 1L << 63;
 
     WorkStealingGlobalQueue (int capacity) {
         if (Integer.bitCount (capacity) != 1) {
@@ -41,20 +39,21 @@ class WorkStealingGlobalQueue {
     }
 
     private long getBase() {
-        final long raw = base;
-        if ((raw & FLAG_SHUTDOWN) != 0) {
+        if (isShutdown == 1)
             throw new WorkStealingShutdownException ();
-        }
-        return raw & (~ FLAG_SHUTDOWN);
+
+        return base;
     }
 
     void shutdown() {
-        long before;
-
-        do {
-            before = base;
-        }
-        while (! U.compareAndSwapLong (this, QBASE, before, before | FLAG_SHUTDOWN));
+        U.putOrderedInt (this, QSHUTDOWN, 1);
+//
+//        long before;
+//
+//        do {
+//            before = base;
+//        }
+//        while (! U.compareAndSwapLong (this, QBASE, before, before | FLAG_SHUTDOWN));
     }
 
     /**
@@ -104,8 +103,7 @@ class WorkStealingGlobalQueue {
                 }
 
                 if (U.compareAndSwapObject (array, j, t, null)) {
-//                    U.getAndAddLong (this, QBASE, 1); // this is pretty costly. better move shutdown flag to separate variable that is written in a relaxed fashion?
-                    U.putOrderedLong (this, QBASE, b + 1); //TODO this is racy --> shutdown flag may get overwritten
+                    U.putOrderedLong (this, QBASE, b + 1);
                     return t;
                 }
             }
@@ -133,6 +131,7 @@ class WorkStealingGlobalQueue {
     private static final Unsafe U;
     private static final long QBASE;
     private static final long QLOCK;
+    private static final long QSHUTDOWN;
     private static final int ABASE;
     private static final int ASHIFT;
     static {
@@ -144,8 +143,9 @@ class WorkStealingGlobalQueue {
 
             Class<?> k = WorkStealingGlobalQueue.class;
             Class<?> ak = WorkStealingGlobalQueue[].class;
-            QBASE = U.objectFieldOffset (k.getDeclaredField("base"));
-            QLOCK = U.objectFieldOffset (k.getDeclaredField("qlock"));
+            QBASE     = U.objectFieldOffset (k.getDeclaredField("base"));
+            QLOCK     = U.objectFieldOffset (k.getDeclaredField("qlock"));
+            QSHUTDOWN = U.objectFieldOffset (k.getDeclaredField("isShutdown"));
             ABASE = U.arrayBaseOffset(ak);
             final int scale = U.arrayIndexScale(ak);
             if ((scale & (scale - 1)) != 0) {
