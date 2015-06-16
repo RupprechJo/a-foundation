@@ -18,7 +18,6 @@ class WorkStealingGlobalQueue {
     @SuppressWarnings ("unused") // all access goes through Unsafe
     private int qlock;          // 1: locked, else 0
 
-    @SuppressWarnings ("FieldCanBeLocal") // write access goes through Unsafe
     private volatile int isShutdown = 0;
 
     private volatile long base;           // index of next slot for poll - never wraps, filtered with bit mask instead
@@ -53,13 +52,13 @@ class WorkStealingGlobalQueue {
     }
 
     void shutdown() {
-        U.putOrderedInt (this, QSHUTDOWN, 1);
+        isShutdown = 1;
     }
 
     /**
      * This is the only place 'top' is modified, and since that happens in a lock, there is no need for protection against races.
      */
-    final void add (ASubmittable task) {
+    final void submit (ASubmittable task) {
         if (task == null) {
             throw new IllegalArgumentException ();
         }

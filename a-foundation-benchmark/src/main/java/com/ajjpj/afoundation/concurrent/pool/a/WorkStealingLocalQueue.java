@@ -13,24 +13,15 @@ import java.util.concurrent.RejectedExecutionException;
  */
 @Contended
 class WorkStealingLocalQueue {
-    public void submit (ASubmittable task) {
-        if (task == null) {
-            throw new NullPointerException ();
-        }
-        this.push (task);
-    }
+    public static final int MAX_CAPACITY = 1 << 26;
 
-    /**
-     * Mask for the flag to signify shutdown of the entire pool. This flag
-     *  is placed in the 'base' field because that field is read with 'volatile'
-     *  semantics on every access, so checking for shutdown incurs minimal
-     *  overhead.
-     */
-    static final int FLAG_SHUTDOWN = 1 << 31;
+    final boolean lifo; // mode for local access
 
-    final boolean lifo; // mode;        // 0: lifo, > 0: fifo, < 0: shared
-    volatile int base;                  // index of next slot for poll
-    int top;                            // index of next slot for push
+    @SuppressWarnings ("FieldCanBeLocal") // write access goes through Unsafe
+    private volatile int isShutdown = 0;
+
+    private volatile long base;                  // index of next slot for poll
+    private long top;                            // index of next slot for push
 
     private final int mask;             // bit mask for accessing elements of the array
     private final ASubmittable[] array; // the elements
@@ -45,8 +36,8 @@ class WorkStealingLocalQueue {
         if (capacity < 8) {
             throw new IllegalArgumentException ("capacity must be at least 8, is " + capacity);
         }
-        if (capacity > (1 << 26)) {
-            throw new IllegalArgumentException ("capacity must not be bigger than " + (1<<26) + ", is " + capacity);
+        if (capacity > MAX_CAPACITY) {
+            throw new IllegalArgumentException ("capacity must not be bigger than " + MAX_CAPACITY + ", is " + capacity);
         }
 
         // Place indices in the center of array (that is not yet allocated)
@@ -55,79 +46,59 @@ class WorkStealingLocalQueue {
         mask = capacity-1;
     }
 
-    private int getBase() {
-        final int raw = base;
-        if ((raw & FLAG_SHUTDOWN) != 0) {
-            throw new WorkStealingShutdownException ();
-        }
-        return raw & (~ FLAG_SHUTDOWN);
+    private long getBase() {
+        checkShutdown ();
+        return base;
     }
 
     void checkShutdown () {
-        getBase ();
+        if (isShutdown == 1) {
+            throw new WorkStealingShutdownException ();
+        }
     }
 
     void shutdown() {
-        int before;
-
-        do {
-            before = base;
-        }
-        while (! U.compareAndSwapInt (this, QBASE, before, before | FLAG_SHUTDOWN));
+        isShutdown = 1;
     }
 
     /**
-     * Pushes a task. Call only by owner. (The shared-queue version is embedded in method externalPush.)
+     * Submits a task. Call only by owner.
      *
-     * @param task the task. Caller must ensure non-null.
-     * @throws java.util.concurrent.RejectedExecutionException if array cannot be resized
+     * @throws java.util.concurrent.RejectedExecutionException if queue is full
      */
-    final void push (ASubmittable task) {
-        final int s = top;
+    final void submit (ASubmittable task) {
+        if (task == null) {
+            throw new NullPointerException ();
+        }
 
-        // get the value of 'base' early to detect shutdown
-        final int base = getBase ();
-
-        U.putOrderedObject (array, unsafeArrayOffset (s), task);
-        top = s+1;
-        final int n = top - base;
-        if (n >= mask) { //TODO is this racy? --> potentially overwriting existing work if capacity is exceeded?
+        final long n = top - getBase ();
+        if (n >= mask) {
             throw new RejectedExecutionException ();
         }
+
+        // 'top' is only ever modified from the owning thread, so there is no need for guarding it.
+        U.putOrderedObject (array, unsafeArrayOffset (top), task.withQueueIndex (top));
+        U.putOrderedLong (this, QTOP, top + 1); //TODO is this necessary? F/J uses regular writes...
     }
 
 
     /**
-     * Takes next task, if one exists, in LIFO order.  Call only
-     * by owner in unshared queues.
+     * Takes next task, if one exists, in LIFO order.  Called only by owning thread.
      */
-    final ASubmittable pop() {
-//            while (true) {
-//                final int s = top-1;
-//                if (s - getBase () < 0) {
-//                    break;
-//                }
-//
-//                final long j = ((m & s) << ASHIFT) + ABASE;
-//                final ASubmittable t = (ASubmittable) U.getObject(a, j);
-//                if (t == null) {
-//                    break;
-//                }
-//                if (U.compareAndSwapObject(a, j, t, null)) {
-//                    top = s;
-//                    return t;
-//                }
-//            }
+    private final ASubmittable pop() {
+        // 'top' is only ever modified from the owning thread, so there is no need for guarding it or refreshing its value.
+        final long newTop = top-1;
 
-        int s;
-        while ((s = top - 1) - getBase () >= 0) { //TODO how to simplify this?
-            long j = unsafeArrayOffset (s);
+        // 'top' is only ever modified from the owning thread, so there is no need for guarding it.
+        while (newTop >= getBase ()) {
+            long j = unsafeArrayOffset (newTop);
             final ASubmittable t = (ASubmittable) U.getObject (array, j);
+            // no need to guard against wrap-arounds: There can be no new submissions to the queue while this method is executing.
             if (t == null) {
                 break;
             }
             if (U.compareAndSwapObject (array, j, t, null)) {
-                top = s;
+                U.putOrderedLong (this, QTOP, newTop); //TODO is this necessary? F/J uses regular writes...
                 return t;
             }
         }
@@ -135,23 +106,31 @@ class WorkStealingLocalQueue {
     }
 
     /**
-     * Takes next task, if one exists, in FIFO order.
+     * Takes next task, if one exists, in FIFO order. This is the only modifying method that may be called from other threads.
      */
     final ASubmittable poll() {
-        int b;
+        long b;
 
-        while ((b = getBase ()) - top < 0) {
-            final int j = unsafeArrayOffset (b);
+        while ((b = getBase ()) < top) {
+            final long j = unsafeArrayOffset (b);
             final ASubmittable t = (ASubmittable) U.getObjectVolatile (array, j);
             if (t != null) {
-                if (U.compareAndSwapObject(array, j, t, null)) {
-                    U.putOrderedInt(this, QBASE, b + 1);
+                if (t.queueIndex != b) {
+                    // This check ensures that we actually fetched the task at 'b' rather than the next
+                    //  task after the ring buffer wrapped around.
+                    continue;
+                }
+
+                if (U.compareAndSwapObject (array, j, t, null)) {
+                    U.putOrderedLong (this, QBASE, b + 1);
                     return t;
                 }
             }
             else if (getBase () == b) {
-                if (b + 1 == top)
+                if (b + 1 == top) {
+                    // another thread is currently removing the last entry --> short cut
                     break;
+                }
 
                 Thread.yield(); // wait for lagging update (very rare)
             }
@@ -167,13 +146,14 @@ class WorkStealingLocalQueue {
     }
 
 
-    private int unsafeArrayOffset (int index) {
+    private long unsafeArrayOffset (long index) {
         return ((mask & index) << ASHIFT) + ABASE;
     }
 
     // Unsafe mechanics
     private static final sun.misc.Unsafe U;
     private static final long QBASE;
+    private static final long QTOP;
     private static final int ABASE;
     private static final int ASHIFT;
     static {
@@ -184,7 +164,8 @@ class WorkStealingLocalQueue {
 
             Class<?> k = WorkStealingLocalQueue.class;
             Class<?> ak = ASubmittable[].class;
-            QBASE = U.objectFieldOffset (k.getDeclaredField("base"));
+            QBASE = U.objectFieldOffset (k.getDeclaredField ("base"));
+            QTOP = U.objectFieldOffset (k.getDeclaredField ("top"));
             ABASE = U.arrayBaseOffset (ak);
             int scale = U.arrayIndexScale (ak);
             if ((scale & (scale - 1)) != 0) {

@@ -27,7 +27,7 @@ public class WorkStealingPoolImpl implements APool {
     final WorkStealingLocalQueue[] localQueues;
     final WorkStealingGlobalQueue globalQueue;
 
-    final AtomicReference<AList<WorkStealingThread>> waitingWorkers = new AtomicReference<> (AList.nil()); // threads will add themselves in 'run' loop when they don't find work
+    final AtomicReference<AList<WorkStealingThread>> waitingWorkers = new AtomicReference<> (AList.nil()); // threads will submit themselves in 'run' loop when they don't find work
 
     private final CountDownLatch shutdownLatch;
 
@@ -84,7 +84,7 @@ public class WorkStealingPoolImpl implements APool {
                 }
                 else {
                     if (shouldCollectStatistics) numGlobalPush.incrementAndGet ();
-                    globalQueue.add (submittable);
+                    globalQueue.submit (submittable);
                 }
             }
         }
