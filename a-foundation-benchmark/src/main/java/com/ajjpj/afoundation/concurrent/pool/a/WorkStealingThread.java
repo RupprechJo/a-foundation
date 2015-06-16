@@ -2,7 +2,6 @@ package com.ajjpj.afoundation.concurrent.pool.a;
 
 import com.ajjpj.afoundation.collection.immutable.AList;
 import com.ajjpj.afoundation.concurrent.pool.a.WorkStealingPoolImpl.ASubmittable;
-import com.ajjpj.afoundation.function.APredicateNoThrow;
 import sun.misc.Unsafe;
 
 import java.lang.reflect.Field;
@@ -144,46 +143,12 @@ class WorkStealingThread extends Thread {
 
         // re-check for available work in queues to avoid a race condition.
 
-        //TODO this or some other strategy (e.g. intermittently waking up from 'park')?
-        newTask = tryGlobalFetch ();
-//        if (newTask == null) newTask = tryActiveWorkStealing ();   //TODO include this or not? Benchmarks indicate it slows things down, but why exactly?
-        if (newTask != null) {
-            // This is a pretty rare code path, therefore the implementation burdens it with checks and overhead wherever possible, so
-            //  other, more frequent paths - such as pool.submit() - can be fast.
-            AList<WorkStealingThread> before, after;
-
-            do {
-                before = pool.waitingWorkers.get ();
-                after = before.filter (new APredicateNoThrow<WorkStealingThread> () {
-                    @Override public boolean apply (WorkStealingThread o) {
-                        return o != WorkStealingThread.this;
-                    }
-                });
-            }
-            while (! pool.waitingWorkers.compareAndSet (before, after));
-
-            if (after.size () == before.size ()) {
-                // The pool is "waking up" this thread concurrently. We actively spin until the 'wake-up task' is set. That is a
-                //  conscious trade-off to keep pool.submit() fast - this race condition is pretty rare, so the trade-off pays in
-                //  practice.
-
-                ASubmittable wakeUp;
-                //noinspection StatementWithEmptyBody
-                while ((wakeUp = wakeUpTask) == null) {
-                    // wait actively
-                }
-
-                // re-inject the wake-up task into the pool
-                pool.doSubmit (wakeUp);
-            }
-
-            newTask.run();
-            return;
-        }
-
         do {
             queue.checkShutdown ();
-            LockSupport.park (); //TODO exception handling
+            //TODO exception handling
+//            System.out.println (Thread.currentThread ().getName () + ": park");
+            LockSupport.park ();
+//            System.out.println (Thread.currentThread ().getName () + ": unpark");
             newTask = wakeUpTask;
 
             // 'stealing' locally submitted work this way is effectively delayed by the 'parkNanos' call above
@@ -192,9 +157,13 @@ class WorkStealingThread extends Thread {
                 // for other cases, shutdown is checked after the task is run anyway
                 queue.checkShutdown ();
             }
+            if (newTask == WorkStealingPoolImpl.CHECK_QUEUES) {
+                queue.checkShutdown ();
+                newTask = tryGlobalFetch ();
+            }
         }
         while (newTask == null);
-        U.putOrderedObject (this, WAKE_UP_TASK, null); //TODO replace with U.compareAndSwap? --> does that have volatile read semantics? Is that even faster?
+        U.putOrderedObject (this, WAKE_UP_TASK, null);
 
         newTask.run ();
     }

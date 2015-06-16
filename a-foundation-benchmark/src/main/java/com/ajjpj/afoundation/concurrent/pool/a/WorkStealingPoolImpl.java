@@ -32,6 +32,7 @@ public class WorkStealingPoolImpl implements APool {
     private final CountDownLatch shutdownLatch;
 
     static final ASubmittable SHUTDOWN = new ASubmittable (null, null);
+    static final ASubmittable CHECK_QUEUES = new ASubmittable (null, null);
 
     public WorkStealingPoolImpl (int numThreads) { //TODO move default values to Builder class
         this (numThreads, 16384, 16384, 100, 1, 100);
@@ -71,10 +72,8 @@ public class WorkStealingPoolImpl implements APool {
 
     void doSubmit (ASubmittable submittable) {
         try {
-            final WorkStealingThread availableWorker = availableWorker ();
-            if (availableWorker != null) {
+            if (wakeUpWorkerWith (submittable)) {
                 if (shouldCollectStatistics) numWakeups.incrementAndGet ();
-                availableWorker.wakeUpWith (submittable);
             }
             else {
                 final Thread curThread = Thread.currentThread ();
@@ -84,13 +83,27 @@ public class WorkStealingPoolImpl implements APool {
                 }
                 else {
                     if (shouldCollectStatistics) numGlobalPush.incrementAndGet ();
+//                    System.out.println ("before submit global");
                     globalQueue.submit (submittable);
+//                    System.out.println ("after submit global");
+
+                    // Wake up a worker to check queues. This handles the rare race condition that all workers went to sleep since the check at the beginning of this method
+                    wakeUpWorkerWith (CHECK_QUEUES);
                 }
             }
         }
         catch (WorkStealingShutdownException e) {
             throw new RejectedExecutionException ("pool is shut down");
         }
+    }
+
+    private boolean wakeUpWorkerWith (ASubmittable task) {
+        final WorkStealingThread availableWorker = availableWorker ();
+        if (availableWorker == null) {
+            return false;
+        }
+        availableWorker.wakeUpWith (task);
+        return true;
     }
 
     private WorkStealingThread availableWorker () {
@@ -120,9 +133,13 @@ public class WorkStealingPoolImpl implements APool {
             q.shutdown ();
         }
 
-        WorkStealingThread worker;
-        while ((worker = availableWorker ()) != null) {
-            worker.wakeUpWith (SHUTDOWN);
+//        WorkStealingThread worker;
+//        while ((worker = availableWorker ()) != null) {
+//            worker.wakeUpWith (SHUTDOWN);
+//        }
+//
+        for (WorkStealingThread thread: threads) {
+            thread.wakeUpWith (SHUTDOWN);
         }
 
         shutdownLatch.await ();

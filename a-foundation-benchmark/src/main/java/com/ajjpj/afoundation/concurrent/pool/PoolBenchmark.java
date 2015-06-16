@@ -14,11 +14,12 @@ import java.util.concurrent.locks.LockSupport;
 /**
  * @author arno
  */
-@Fork (0)
+@Fork (3)
+//@Fork (0)
 //@Fork (1)
 @Threads (1)
 @Warmup (iterations = 3, time = 1)
-@Measurement (iterations = 3, time = 3)
+@Measurement (iterations = 5, time = 10)
 @State (Scope.Benchmark)
 public class PoolBenchmark {
     APool pool;
@@ -70,14 +71,14 @@ public class PoolBenchmark {
         latch.await ();
     }
 
-//    @Benchmark
+    @Benchmark
     public void testFactorialSingle() throws ExecutionException, InterruptedException {
         final SettableFutureTask<Long> fact = new SettableFutureTask<> (() -> null);
         fact (1, 12, fact);
         fact.get ();
     }
 
-//    @Benchmark
+    @Benchmark
     @Threads (7)
     public void testFactorialMulti7() throws ExecutionException, InterruptedException {
         final SettableFutureTask<Long> fact = new SettableFutureTask<> (() -> null);
@@ -85,7 +86,7 @@ public class PoolBenchmark {
         fact.get ();
     }
 
-//    @Benchmark
+    @Benchmark
     @Threads (8)
     public void testFactorialMulti8() throws ExecutionException, InterruptedException {
         final SettableFutureTask<Long> fact = new SettableFutureTask<> (() -> null);
@@ -115,7 +116,7 @@ public class PoolBenchmark {
         }
     }
 
-//    @Benchmark
+    @Benchmark
     public void testRecursiveFibo() throws ExecutionException, InterruptedException {
         fibo (8);
     }
@@ -146,6 +147,7 @@ public class PoolBenchmark {
     public void testStealExpensive() throws InterruptedException {
         final CountDownLatch latch = new CountDownLatch (10_000);
 
+//        System.out.println ("before initial submit");
         pool.submit (() -> {
            for (int i=0; i<10_000; i++) {
                pool.submit (() -> {
@@ -156,9 +158,10 @@ public class PoolBenchmark {
             return null;
         });
         latch.await ();
+//        System.out.println ("--");
     }
 
-//    @Benchmark
+    @Benchmark
     public void testPingPong1() throws InterruptedException {
         testPingPong (1);
     }
@@ -168,12 +171,12 @@ public class PoolBenchmark {
         testPingPong (2);
     }
 
-//    @Benchmark
+    @Benchmark
     public void testPingPong7() throws InterruptedException {
         testPingPong (7);
     }
 
-//    @Benchmark
+    @Benchmark
     public void testPingPong32() throws InterruptedException {
         testPingPong (32);
     }
