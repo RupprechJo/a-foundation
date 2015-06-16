@@ -127,7 +127,7 @@ public class PoolBenchmark {
         return f.get() + pool.submit (() -> fibo(n-2)).get ();
     }
 
-    @Benchmark
+//    @Benchmark
     public void testStealVeryCheap() throws InterruptedException {
         final CountDownLatch latch = new CountDownLatch (10_000);
 
@@ -142,7 +142,7 @@ public class PoolBenchmark {
         latch.await ();
     }
 
-    @Benchmark
+//    @Benchmark
     public void testStealExpensive() throws InterruptedException {
         final CountDownLatch latch = new CountDownLatch (10_000);
 
@@ -163,7 +163,7 @@ public class PoolBenchmark {
         testPingPong (1);
     }
 
-    @Benchmark
+//    @Benchmark
     public void testPingPong2() throws InterruptedException {
         testPingPong (2);
     }

@@ -5,7 +5,6 @@ import sun.misc.Contended;
 import sun.misc.Unsafe;
 
 import java.lang.reflect.Field;
-import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.RejectedExecutionException;
 
 
@@ -15,12 +14,14 @@ import java.util.concurrent.RejectedExecutionException;
 @Contended
 class WorkStealingGlobalQueue {
     volatile int qlock;          // 1: locked, else 0
-    volatile int base;           // index of next slot for poll
-    int top;                     // index of next slot for push
+    volatile long base;           // index of next slot for poll - never wraps, filtered with bit mask instead
+    long top;                     // index of next slot for push - never wraps, filtered with bit mask instead
+    boolean isShutdown = false;
 
     final int mask;             // bit mask for accessing the element array
     final ASubmittable[] array; // the elements
 
+    static final long FLAG_SHUTDOWN = 1L << 63;
 
     WorkStealingGlobalQueue (int capacity) {
         if (Integer.bitCount (capacity) != 1) {
@@ -39,118 +40,92 @@ class WorkStealingGlobalQueue {
         mask = capacity-1;
     }
 
-    private int getBase() {
-        final int raw = base;
-        if ((raw & WorkStealingLocalQueue.FLAG_SHUTDOWN) != 0) {
+    private long getBase() {
+        final long raw = base;
+        if ((raw & FLAG_SHUTDOWN) != 0) {
             throw new WorkStealingShutdownException ();
         }
-        return raw & (~ WorkStealingLocalQueue.FLAG_SHUTDOWN);
+        return raw & (~ FLAG_SHUTDOWN);
     }
 
     void shutdown() {
-        int before;
+        long before;
 
         do {
             before = base;
         }
-        while (! U.compareAndSwapInt (this, QBASE, before, before | WorkStealingLocalQueue.FLAG_SHUTDOWN));
+        while (! U.compareAndSwapLong (this, QBASE, before, before | FLAG_SHUTDOWN));
     }
 
     /**
-     * Unless shutting down, adds the given task to a submission queue
-     * at submitter's current queue index (modulo submission
-     * range). Only the most common path is directly handled in this
-     * method. All others are relayed to fullExternalPush.
-     *
-     * @param task the task. Caller must ensure non-null.
+     * This is the only place 'top' is modified, and since that happens in a lock, there is no need for protection against races.
      */
-    final void externalPush(ASubmittable task) {
-        if (U.compareAndSwapInt (this, QLOCK, 0, 1)) { // lock
-            final ASubmittable[] a = array;
-            final int am = a.length - 1;
-            final int s = top;
-            final int n = s - getBase (); //TODO unlock in finally block? --> shutdown exception?
-            if (am > n) {
-                int j = ((am & s) << ASHIFT) + ABASE;
-                U.putOrderedObject(a, j, task);
-                top = s + 1;                     // push on to deque
-                qlock = 0;
-
-                return;
-            }
-            qlock = 0;
+    final void add (ASubmittable task) {
+        if (task == null) {
+            throw new IllegalArgumentException ();
         }
-        fullExternalPush(task);
-    }
 
-    /**
-     * Full version of externalPush. This method is called, among
-     * other times, upon the first submission of the first task to the
-     * pool, so must perform secondary initialization.  It also
-     * detects first submission by an external thread by looking up
-     * its ThreadLocal, and creates a new shared queue if the one at
-     * index if empty or contended. The plock lock body must be
-     * exception-free (so no try/finally) so we optimistically
-     * allocate new queues outside the lock and throw them away if
-     * (very rarely) not needed.
-     *
-     * Secondary initialization occurs when plock is zero, to create
-     * workQueue array and set plock to a valid value.  This lock body
-     * must also be exception-free. Because the plock seq value can
-     * eventually wrap around zero, this method harmlessly fails to
-     * reinitialize if workQueues exists, while still advancing plock.
-     */
-    private void fullExternalPush (ASubmittable task) {
-        for (;;) { //TODO refactor into CAS loop?
-            if (U.compareAndSwapInt (this, QLOCK, 0, 1)) {
-                int s = top;
-                boolean submitted = false;
-                try {
-                    if (array.length <= s+1 - getBase ()) {
-                        throw new RejectedExecutionException ();
-                    }
+        //noinspection StatementWithEmptyBody
+        while (! U.compareAndSwapInt (this, QLOCK, 0, 1)) {
+            // acquire spin lock
+        }
 
-                    int j = unsafeArrayOffset (s);
-                    U.putOrderedObject (array, j, task);
-                    top = s + 1;
-                    submitted = true;
-                }
-                finally {
-                    qlock = 0;  // unlock
-                }
-                if (submitted) {
-                    return;
-                }
+        try {
+            final long n = top - getBase (); //TODO unlock in finally block? --> shutdown exception?
+
+            if (n >= mask) {
+                throw new RejectedExecutionException ();//TODO message
             }
+
+            final long j = unsafeArrayOffset (top);
+            U.putOrderedObject (array, j, task.withQueueIndex (top)); //TODO can we get away with a regular mutable field so as to avoid object creation with associated barriers?
+            top += 1;
+        }
+        finally {
+            qlock = 0; //TODO putOrderedInt?
         }
     }
-
 
     /**
      * Takes next task, if one exists, in FIFO order.
      */
     final ASubmittable poll() {
-        int b;
+        long b;
 
-        while ((b = getBase ()) - top < 0) {
-            final int j = unsafeArrayOffset (b);
+        while ((b = getBase ()) < top) {
+            final long j = unsafeArrayOffset (b);
             final ASubmittable t = (ASubmittable) U.getObjectVolatile (array, j);
+
             if (t != null) {
+                if (t.queueIndex != b) {
+                    // This check ensures that we actually fetched the task at 'b' rather than the next
+                    //  task after the ring buffer wrapped around.
+                    continue;
+                }
+
                 if (U.compareAndSwapObject (array, j, t, null)) {
-                    U.putOrderedInt (this, QBASE, b + 1);
+//                    U.getAndAddLong (this, QBASE, 1); // this is pretty costly. better move shutdown flag to separate variable that is written in a relaxed fashion?
+                    U.putOrderedLong (this, QBASE, b + 1); //TODO this is racy --> shutdown flag may get overwritten
                     return t;
                 }
             }
-            else if (getBase () == b) {
-                if (b + 1 == top)
+            else {
+                if (b + 1 == top) {
+                    // another thread is currently removing the last entry --> short cut
                     break;
+                }
+
                 Thread.yield(); // wait for lagging update (very rare)
             }
         }
         return null;
     }
 
-    private int unsafeArrayOffset (int index) {
+    private void log (String s) {
+        System.out.println (s);
+    }
+
+    private long unsafeArrayOffset (long index) {
         return ((mask & index) << ASHIFT) + ABASE;
     }
 
@@ -168,19 +143,17 @@ class WorkStealingGlobalQueue {
 
 
             Class<?> k = WorkStealingGlobalQueue.class;
-            Class<?> ak = ForkJoinTask[].class;
-            QBASE = U.objectFieldOffset
-                    (k.getDeclaredField("base"));
-            QLOCK = U.objectFieldOffset
-                    (k.getDeclaredField("qlock"));
+            Class<?> ak = WorkStealingGlobalQueue[].class;
+            QBASE = U.objectFieldOffset (k.getDeclaredField("base"));
+            QLOCK = U.objectFieldOffset (k.getDeclaredField("qlock"));
             ABASE = U.arrayBaseOffset(ak);
-            int scale = U.arrayIndexScale(ak);
-            if ((scale & (scale - 1)) != 0)
-                throw new Error("data type scale not a power of two");
+            final int scale = U.arrayIndexScale(ak);
+            if ((scale & (scale - 1)) != 0) {
+                throw new Error ("data type scale not a power of two");
+            }
             ASHIFT = 31 - Integer.numberOfLeadingZeros(scale);
         } catch (Exception e) {
             throw new Error(e);
         }
     }
-
 }

@@ -84,7 +84,7 @@ public class WorkStealingPoolImpl implements APool {
                 }
                 else {
                     if (shouldCollectStatistics) numGlobalPush.incrementAndGet ();
-                    globalQueue.externalPush (submittable);
+                    globalQueue.add (submittable);
                 }
             }
         }
@@ -151,12 +151,20 @@ public class WorkStealingPoolImpl implements APool {
     //----------------------------------- internal data structure for submitted task
 
     static class ASubmittable implements Runnable {
+        static final long UNQUEUED = -1;
+
         private final ATask result;
         private final Callable code;
+        final long queueIndex;
 
-        public ASubmittable (ATask result, Callable code) {
+        ASubmittable (ATask result, Callable code) {
+            this (result, code, UNQUEUED);
+        }
+
+        ASubmittable (ATask result, Callable code, long queueIndex) {
             this.result = result;
             this.code = code;
+            this.queueIndex = queueIndex;
         }
 
         @SuppressWarnings ("unchecked")
@@ -167,6 +175,10 @@ public class WorkStealingPoolImpl implements APool {
             catch (Throwable th) {
                 result.setException (th);
             }
+        }
+
+        ASubmittable withQueueIndex (long queueIndex) {
+            return new ASubmittable (result, code, queueIndex);
         }
     }
 }
