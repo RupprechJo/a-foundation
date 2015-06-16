@@ -13,10 +13,16 @@ import java.util.concurrent.RejectedExecutionException;
  */
 @Contended
 class WorkStealingGlobalQueue {
-    volatile int qlock;          // 1: locked, else 0
-    volatile long base;           // index of next slot for poll - never wraps, filtered with bit mask instead
-    long top;                     // index of next slot for push - never wraps, filtered with bit mask instead
-    volatile int isShutdown = 0;
+    public static final int MAX_CAPACITY = 1 << 26;
+
+    @SuppressWarnings ("unused") // all access goes through Unsafe
+    private int qlock;          // 1: locked, else 0
+
+    @SuppressWarnings ("FieldCanBeLocal") // write access goes through Unsafe
+    private volatile int isShutdown = 0;
+
+    private volatile long base;           // index of next slot for poll - never wraps, filtered with bit mask instead
+    private long top;                     // index of next slot for push - never wraps, filtered with bit mask instead
 
     final int mask;             // bit mask for accessing the element array
     final ASubmittable[] array; // the elements
@@ -28,8 +34,8 @@ class WorkStealingGlobalQueue {
         if (capacity < 8) {
             throw new IllegalArgumentException ("capacity must be at least 8, is " + capacity);
         }
-        if (capacity > (1 << 26)) {
-            throw new IllegalArgumentException ("capacity must not be bigger than " + (1<<26) + ", is " + capacity);
+        if (capacity > MAX_CAPACITY) {
+            throw new IllegalArgumentException ("capacity must not be bigger than " + MAX_CAPACITY + ", is " + capacity);
         }
 
         // Place indices in the center of array (that is not yet allocated)
@@ -39,21 +45,15 @@ class WorkStealingGlobalQueue {
     }
 
     private long getBase() {
-        if (isShutdown == 1)
+        if (isShutdown == 1) {
             throw new WorkStealingShutdownException ();
+        }
 
         return base;
     }
 
     void shutdown() {
         U.putOrderedInt (this, QSHUTDOWN, 1);
-//
-//        long before;
-//
-//        do {
-//            before = base;
-//        }
-//        while (! U.compareAndSwapLong (this, QBASE, before, before | FLAG_SHUTDOWN));
     }
 
     /**
@@ -70,18 +70,23 @@ class WorkStealingGlobalQueue {
         }
 
         try {
-            final long n = top - getBase (); //TODO unlock in finally block? --> shutdown exception?
+            final long n = top - getBase ();
 
             if (n >= mask) {
                 throw new RejectedExecutionException ();//TODO message
             }
 
             final long j = unsafeArrayOffset (top);
-            U.putOrderedObject (array, j, task.withQueueIndex (top)); //TODO can we get away with a regular mutable field so as to avoid object creation with associated barriers?
+
+            //TODO verify that we can get away with a regular mutable field so as to avoid object creation with associated barriers - all read access goes
+            //TODO  through a U.getObjectVolatile, so we should be fine, right? The difference is in the implementation of 'withQueueIndex'
+            U.putOrderedObject (array, j, task.withQueueIndex (top));
             top += 1;
         }
         finally {
-            qlock = 0; //TODO putOrderedInt?
+            //TODO verify that this is a valid optimization
+            U.putOrderedInt (this, QLOCK, 0);
+//            qlock = 0;
         }
     }
 
@@ -119,10 +124,6 @@ class WorkStealingGlobalQueue {
         return null;
     }
 
-    private void log (String s) {
-        System.out.println (s);
-    }
-
     private long unsafeArrayOffset (long index) {
         return ((mask & index) << ASHIFT) + ABASE;
     }
@@ -146,7 +147,7 @@ class WorkStealingGlobalQueue {
             QBASE     = U.objectFieldOffset (k.getDeclaredField("base"));
             QLOCK     = U.objectFieldOffset (k.getDeclaredField("qlock"));
             QSHUTDOWN = U.objectFieldOffset (k.getDeclaredField("isShutdown"));
-            ABASE = U.arrayBaseOffset(ak);
+            ABASE = U.arrayBaseOffset (ak);
             final int scale = U.arrayIndexScale(ak);
             if ((scale & (scale - 1)) != 0) {
                 throw new Error ("data type scale not a power of two");

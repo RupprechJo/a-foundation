@@ -155,7 +155,7 @@ public class WorkStealingPoolImpl implements APool {
 
         private final ATask result;
         private final Callable code;
-        final long queueIndex;
+        long queueIndex;
 
         ASubmittable (ATask result, Callable code) {
             this (result, code, UNQUEUED);
@@ -178,7 +178,9 @@ public class WorkStealingPoolImpl implements APool {
         }
 
         ASubmittable withQueueIndex (long queueIndex) {
-            return new ASubmittable (result, code, queueIndex);
+            this.queueIndex = queueIndex;
+            return this;
+//            return new ASubmittable (result, code, queueIndex);
         }
     }
 }
