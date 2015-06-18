@@ -129,7 +129,7 @@ public class PoolBenchmark {
     }
 
     @Benchmark
-    public void testStealVeryCheap() throws InterruptedException {
+    public void _testStealVeryCheap() throws InterruptedException {
         final CountDownLatch latch = new CountDownLatch (10_000);
 
         pool.submit (() -> {
@@ -144,7 +144,7 @@ public class PoolBenchmark {
     }
 
     @Benchmark
-    public void testStealExpensive() throws InterruptedException {
+    public void _testStealExpensive() throws InterruptedException {
         final CountDownLatch latch = new CountDownLatch (10_000);
 
         pool.submit (() -> {

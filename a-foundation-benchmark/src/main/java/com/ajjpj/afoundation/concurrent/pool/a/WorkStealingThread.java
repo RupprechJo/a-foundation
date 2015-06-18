@@ -1,6 +1,7 @@
 package com.ajjpj.afoundation.concurrent.pool.a;
 
 import com.ajjpj.afoundation.concurrent.pool.a.WorkStealingPoolImpl.ASubmittable;
+import sun.misc.Contended;
 import sun.misc.Unsafe;
 
 import java.lang.reflect.Field;
@@ -10,7 +11,10 @@ import java.util.concurrent.locks.LockSupport;
 /**
  * @author arno
  */
+@Contended
 class WorkStealingThread extends Thread {
+    //TODO When the implementation is stable, ensure that all data fits into a single cache line.
+    //TODO combine with LocalQueue into a single class for more data locality and less indirection?
     final WorkStealingLocalQueue queue;
     final WorkStealingPoolImpl pool;
 
@@ -22,7 +26,8 @@ class WorkStealingThread extends Thread {
 
     //TODO configuration parameter for 'no work stealing'
 
-    @SuppressWarnings ("unused") // is written with Unsafe.putOrderedObject
+    // is written with Unsafe.putOrderedObject
+    @SuppressWarnings ("unused")
     private volatile ASubmittable wakeUpTask;
 
     //TODO optimization: is a lazySet sufficient for in-thread access as long as other threads use a volatile read? Is there a 'lazy CAS'?
@@ -73,7 +78,7 @@ class WorkStealingThread extends Thread {
                     pool.onThreadFinished (this);
                 }
                 catch (Throwable exc2) {
-                    exc2.printStackTrace ();
+                    exc2.printStackTrace (); //TODO exception handling
                 }
                 finally {
                     //noinspection ReturnInsideFinallyBlock
@@ -114,7 +119,7 @@ class WorkStealingThread extends Thread {
         return null;
     }
 
-    private void waitForWork () {
+    private void waitForWork () throws InterruptedException {
         // There is currently no work available for this thread. That means that there is currently not enough work for all
         //  worker threads, i.e. the pool is in a 'low load' situation.
         //
@@ -132,10 +137,7 @@ class WorkStealingThread extends Thread {
 
         for (int i=0; i<numPollsBeforePark; i++) {
             // wait a little while and look again before really going to sleep
-            LockSupport.parkNanos (pollNanosBeforePark);
-            if (wakeUpTask != null) {
-                System.out.println ("************************** " + wakeUpTask);
-            }
+            LockSupport.parkNanos (null, pollNanosBeforePark); //TODO replace with U.parkNanos --> avoid even touching the 'blocker' field
             if (exec (tryGlobalFetch ()) || exec (tryActiveWorkStealing ())) return;
         }
 
