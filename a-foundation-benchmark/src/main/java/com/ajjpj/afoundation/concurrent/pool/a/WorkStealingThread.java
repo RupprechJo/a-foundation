@@ -1,6 +1,5 @@
 package com.ajjpj.afoundation.concurrent.pool.a;
 
-import com.ajjpj.afoundation.collection.immutable.AList;
 import com.ajjpj.afoundation.concurrent.pool.a.WorkStealingPoolImpl.ASubmittable;
 import sun.misc.Unsafe;
 
@@ -116,8 +115,6 @@ class WorkStealingThread extends Thread {
     }
 
     private void waitForWork () {
-        ASubmittable newTask;
-
         // There is currently no work available for this thread. That means that there is currently not enough work for all
         //  worker threads, i.e. the pool is in a 'low load' situation.
         //
@@ -136,33 +133,35 @@ class WorkStealingThread extends Thread {
         for (int i=0; i<numPollsBeforePark; i++) {
             // wait a little while and look again before really going to sleep
             LockSupport.parkNanos (pollNanosBeforePark);
+            if (wakeUpTask != null) {
+                System.out.println ("************************** " + wakeUpTask);
+            }
             if (exec (tryGlobalFetch ()) || exec (tryActiveWorkStealing ())) return;
         }
 
-        preparePark ();
+        // This call checks for last-minute work under a global lock
+        ASubmittable newTask = pool.globalQueue.addWorkerToAvailables (this);
 
         // re-check for available work in queues to avoid a race condition.
 
-        do {
+        while (newTask == null) {
             queue.checkShutdown ();
             //TODO exception handling
 //            System.out.println (Thread.currentThread ().getName () + ": park");
             LockSupport.park ();
-//            System.out.println (Thread.currentThread ().getName () + ": unpark");
             newTask = wakeUpTask;
+//            System.out.println (Thread.currentThread ().getName () + ": unpark with " + newTask);
 
             // 'stealing' locally submitted work this way is effectively delayed by the 'parkNanos' call above
 
-            if (newTask == null || newTask == WorkStealingPoolImpl.SHUTDOWN) {
-                // for other cases, shutdown is checked after the task is run anyway
-                queue.checkShutdown ();
+            if (newTask == null) {
+                newTask = tryGlobalFetch ();
             }
-            if (newTask == WorkStealingPoolImpl.CHECK_QUEUES) {
+            else if (newTask == WorkStealingPoolImpl.CHECK_QUEUES) {
                 queue.checkShutdown ();
                 newTask = tryGlobalFetch ();
             }
         }
-        while (newTask == null);
         U.putOrderedObject (this, WAKE_UP_TASK, null);
 
         newTask.run ();
@@ -171,15 +170,6 @@ class WorkStealingThread extends Thread {
     void wakeUpWith (ASubmittable task) {
         U.putOrderedObject (this, WAKE_UP_TASK, task); // is read with volatile semantics after wake-up
         LockSupport.unpark (this);
-    }
-
-    private void preparePark() {
-        // removal from the stack of 'waiting workers' happens in the pool
-        AList<WorkStealingThread> before;
-        do {
-            before = pool.waitingWorkers.get ();
-        }
-        while (! pool.waitingWorkers.compareAndSet (before, before.cons (this)));
     }
 
     // Unsafe mechanics

@@ -1,6 +1,5 @@
 package com.ajjpj.afoundation.concurrent.pool.a;
 
-import com.ajjpj.afoundation.collection.immutable.AList;
 import com.ajjpj.afoundation.concurrent.pool.AFuture;
 import com.ajjpj.afoundation.concurrent.pool.APool;
 
@@ -8,7 +7,6 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 
 
 /**
@@ -27,11 +25,8 @@ public class WorkStealingPoolImpl implements APool {
     final WorkStealingLocalQueue[] localQueues;
     final WorkStealingGlobalQueue globalQueue;
 
-    final AtomicReference<AList<WorkStealingThread>> waitingWorkers = new AtomicReference<> (AList.nil()); // threads will submit themselves in 'run' loop when they don't find work
-
     private final CountDownLatch shutdownLatch;
 
-    static final ASubmittable SHUTDOWN = new ASubmittable (null, null);
     static final ASubmittable CHECK_QUEUES = new ASubmittable (null, null);
 
     public WorkStealingPoolImpl (int numThreads) { //TODO move default values to Builder class
@@ -70,57 +65,39 @@ public class WorkStealingPoolImpl implements APool {
         return result;
     }
 
-    void doSubmit (ASubmittable submittable) {
+    void doSubmit (ASubmittable task) {
+        //TODO ensure that 'shutdown' is properly detected
         try {
-            if (wakeUpWorkerWith (submittable)) {
-                if (shouldCollectStatistics) numWakeups.incrementAndGet ();
-            }
-            else {
+//            if (wakeUpWorkerWith (submittable)) {
+//                if (shouldCollectStatistics) numWakeups.incrementAndGet ();
+//            }
+//            else {
                 final Thread curThread = Thread.currentThread ();
                 if (curThread instanceof WorkStealingThread && ((WorkStealingThread) curThread).pool == this) {
-                    if (shouldCollectStatistics) numLocalPush.incrementAndGet ();
-                    ((WorkStealingThread) curThread).queue.submit (submittable);
+                    if (! globalQueue.tryWakeupWorker (task)) {
+                        if (shouldCollectStatistics) numLocalPush.incrementAndGet ();
+                        ((WorkStealingThread) curThread).queue.submit (task);
+                    }
                 }
                 else {
                     if (shouldCollectStatistics) numGlobalPush.incrementAndGet ();
 //                    System.out.println ("before submit global");
-                    globalQueue.submit (submittable);
+
+                    // 'submit' first attempts to shortcut by waking up an available worker thread. That code was moved to the global queue
+                    //  so that the lock must be acquired only once, ensuring atomicity at the same time.
+                    globalQueue.submit (task);
 //                    System.out.println ("after submit global");
 
+//                    System.out.println ("global push: waking up worker");
                     // Wake up a worker to check queues. This handles the rare race condition that all workers went to sleep since the check at the beginning of this method
-                    wakeUpWorkerWith (CHECK_QUEUES);
+//                    wakeUpWorkerWith (CHECK_QUEUES);
+//                    System.out.println ("  after global push");
                 }
-            }
+//            }
         }
         catch (WorkStealingShutdownException e) {
             throw new RejectedExecutionException ("pool is shut down");
         }
-    }
-
-    private boolean wakeUpWorkerWith (ASubmittable task) {
-        final WorkStealingThread availableWorker = availableWorker ();
-        if (availableWorker == null) {
-            return false;
-        }
-        availableWorker.wakeUpWith (task);
-        return true;
-    }
-
-    private WorkStealingThread availableWorker () {
-        WorkStealingThread worker;
-        AList<WorkStealingThread> before;
-
-        do {
-            before = waitingWorkers.get ();
-            if (before.isEmpty ()) {
-                return null;
-            }
-            worker = before.head ();
-
-        }
-        while (!waitingWorkers.compareAndSet (before, before.tail ())); //TODO use Unsafe?
-
-        return worker;
     }
 
     void onThreadFinished (WorkStealingThread thread) {
@@ -139,7 +116,7 @@ public class WorkStealingPoolImpl implements APool {
 //        }
 //
         for (WorkStealingThread thread: threads) {
-            thread.wakeUpWith (SHUTDOWN);
+            thread.wakeUpWith (null);
         }
 
         shutdownLatch.await ();

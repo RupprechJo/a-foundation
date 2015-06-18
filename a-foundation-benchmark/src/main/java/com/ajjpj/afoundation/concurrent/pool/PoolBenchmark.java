@@ -14,12 +14,12 @@ import java.util.concurrent.locks.LockSupport;
 /**
  * @author arno
  */
-@Fork (3)
-//@Fork (0)
+//@Fork (2)
+@Fork (0)
 //@Fork (1)
 @Threads (1)
 @Warmup (iterations = 3, time = 1)
-@Measurement (iterations = 5, time = 10)
+@Measurement (iterations = 3, time = 5)
 @State (Scope.Benchmark)
 public class PoolBenchmark {
     APool pool;
@@ -59,7 +59,7 @@ public class PoolBenchmark {
     }
 
     @Benchmark
-    public void testSimpleScheduling() throws InterruptedException {
+    public void _testSimpleScheduling() throws InterruptedException {
         final int num = 10_000;
         final CountDownLatch latch = new CountDownLatch (num);
 
@@ -147,7 +147,6 @@ public class PoolBenchmark {
     public void testStealExpensive() throws InterruptedException {
         final CountDownLatch latch = new CountDownLatch (10_000);
 
-//        System.out.println ("before initial submit");
         pool.submit (() -> {
            for (int i=0; i<10_000; i++) {
                pool.submit (() -> {

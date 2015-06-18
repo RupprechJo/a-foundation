@@ -1,5 +1,6 @@
 package com.ajjpj.afoundation.concurrent.pool.a;
 
+import com.ajjpj.afoundation.collection.immutable.AList;
 import com.ajjpj.afoundation.concurrent.pool.a.WorkStealingPoolImpl.ASubmittable;
 import sun.misc.Contended;
 import sun.misc.Unsafe;
@@ -26,6 +27,10 @@ class WorkStealingGlobalQueue {
     final int mask;             // bit mask for accessing the element array
     final ASubmittable[] array; // the elements
 
+    // Threads will submit themselves in 'run' loop when they don't find work. All access is protected by 'qlock' spin lock.
+    AList<WorkStealingThread> waitingWorkers = AList.nil();
+
+
     WorkStealingGlobalQueue (int capacity) {
         if (Integer.bitCount (capacity) != 1) {
             throw new IllegalArgumentException ("capacity must be a power of two, is " + capacity);
@@ -44,15 +49,80 @@ class WorkStealingGlobalQueue {
     }
 
     private long getBase() {
+        checkShutdown ();
+        return base;
+    }
+
+    private void checkShutdown() {
         if (isShutdown == 1) {
             throw new WorkStealingShutdownException ();
         }
-
-        return base;
     }
 
     void shutdown() {
         isShutdown = 1;
+    }
+
+    synchronized ASubmittable addWorkerToAvailables (WorkStealingThread thread) {
+
+
+//        //noinspection StatementWithEmptyBody
+//        while (! U.compareAndSwapInt (this, QLOCK, 0, 1)) {
+//            // acquire spin lock
+//        }
+//
+//        try {
+            final ASubmittable task = poll ();
+            if (task == null) {
+                waitingWorkers = waitingWorkers.cons (thread);
+                return null;
+            }
+            else {
+                return task;
+            }
+//        }
+//        finally {
+//            qlock = 0;
+//        }
+    }
+
+    boolean tryWakeupWorker (ASubmittable task) {
+        WorkStealingThread availableWorker = null;
+
+        synchronized (this) {
+//        //noinspection StatementWithEmptyBody
+//        while (! U.compareAndSwapInt (this, QLOCK, 0, 1)) { }
+//
+//        try {
+            availableWorker = doTryWakeUpWorker ();
+//        }
+//        finally {
+//            qlock = 0;
+//        }
+        }
+
+        if (availableWorker != null) {
+            availableWorker.wakeUpWith (task);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Does the actual waking up of a thread, if available. This method must only be called with the 'qlock' spin lock held.
+     */
+    private WorkStealingThread doTryWakeUpWorker () {
+        // shortcut: if threads are waiting, wake one of them up with the new task rather than going through the queue proper.
+
+        if (waitingWorkers.isEmpty ()) {
+            return null;
+        }
+        // in the other path, 'getBase()' is called and checks for shutdown.
+        checkShutdown ();
+
+        final WorkStealingThread availableWorker = waitingWorkers.head ();
+        waitingWorkers = waitingWorkers.tail ();
+        return availableWorker;
     }
 
     /**
@@ -63,30 +133,41 @@ class WorkStealingGlobalQueue {
             throw new IllegalArgumentException ();
         }
 
-        //noinspection StatementWithEmptyBody
-        while (! U.compareAndSwapInt (this, QLOCK, 0, 1)) {
-            // acquire spin lock
+        WorkStealingThread availableWorker = null;
+        synchronized (this) {
+
+//            //noinspection StatementWithEmptyBody
+//            while (!U.compareAndSwapInt (this, QLOCK, 0, 1)) {
+//                // acquire spin lock
+//            }
+
+
+//            try {
+                // shortcut: if threads are waiting, wake one of them up with the new task rather than going through the queue proper.
+                if ((availableWorker = doTryWakeUpWorker ()) == null) {
+                    final long n = top - getBase (); // call 'getBase()' early to ensure
+
+                    if (n >= mask) {
+                        throw new RejectedExecutionException ();//TODO message
+                    }
+
+                    final long j = unsafeArrayOffset (top);
+
+                    //TODO Verify that we can get away with a regular mutable field for the queue index so as to avoid object creation with associated barriers - all read access goes
+                    //TODO  through a U.getObjectVolatile, so we should be fine, right? The difference is in the implementation of 'withQueueIndex'
+                    U.putOrderedObject (array, j, task.withQueueIndex (top));
+                    top += 1;
+                    return;
+                }
+//            }
+//            finally {
+//                //TODO verify that this is a valid optimization
+////            U.putOrderedInt (this, QLOCK, 0);
+//                qlock = 0;
+//            }
         }
 
-        try {
-            final long n = top - getBase ();
-
-            if (n >= mask) {
-                throw new RejectedExecutionException ();//TODO message
-            }
-
-            final long j = unsafeArrayOffset (top);
-
-            //TODO verify that we can get away with a regular mutable field so as to avoid object creation with associated barriers - all read access goes
-            //TODO  through a U.getObjectVolatile, so we should be fine, right? The difference is in the implementation of 'withQueueIndex'
-            U.putOrderedObject (array, j, task.withQueueIndex (top));
-            top += 1;
-        }
-        finally {
-            //TODO verify that this is a valid optimization
-            U.putOrderedInt (this, QLOCK, 0);
-//            qlock = 0;
-        }
+        availableWorker.wakeUpWith (task);
     }
 
     /**
@@ -123,11 +204,12 @@ class WorkStealingGlobalQueue {
         return null;
     }
 
+    // Unsafe mechanics
+
     private long unsafeArrayOffset (long index) {
         return ((mask & index) << ASHIFT) + ABASE;
     }
 
-    // Unsafe mechanics
     private static final Unsafe U;
     private static final long QBASE;
     private static final long QLOCK;
